@@ -11,19 +11,22 @@
  *   3. 軽い診断 …………… シート名・sheetId・表示状態・行数・列数などだけを一覧にする
  *   小さな試験 ………… 代表シート1枚だけを読み、読み取りにかかった時間を測る(予約を作らない)
  *   4. 詳しい診断 ………… シートを少しずつ読み、数式・参照・入力規則などを数える(止めても続きから)
- *   8〜10. 比較基準 ……… 大事な集計の値を記録しておき、あとで変わっていないかを比べる
+ *   8〜10. 比較基準 ……… 大事な集計の値を保管用(変更前の状態)から記録し、試験用コピーと比べる
+ *   11. 所要時間 ………… 試験用コピーの「変更後」と「変更前」のシートで、再計算にかかる時間を比べる
  *
  *   自動の続き(時間で区切ったあと、予約で続きを実行する)は、最初はオフです。
  *   小さな試験と、手動での「4.」1回分を確かめてから、メニューでオンにします。
  *
  * 安全のための約束
- *   ・この版の処理は、本番・保管用・試験用コピーのどれにも書き込みません(読むだけ)。
+ *   ・1〜10 は、本番・保管用・試験用コピーのどれにも書き込みません(読むだけ)。
  *     書き込むのは、このコードを入れた「軽量化ツール_診断」ファイルだけです。
+ *   ・11 だけは試験用コピーに書き込みます。指定のセルの数式を同じ値になる書き方に一時的に替えて
+ *     再計算させ、毎回もとの数式に戻します。本番・保管用には書き込みません(ID が同じなら止まる)。
  *   ・ファイルの ID はコードに書かず、メニューから登録します(スクリプト プロパティに保存)。
  */
 
 const LT = {
-  VERSION: 'v2.1(2026-10-15)診断版',
+  VERSION: 'v2.2(2026-10-16)診断版+所要時間',
   MENU: '🛠 軽量化ツール',
   REPRESENTATIVE_SHEET: '001', // 構造を比べるときの基準にするシート
   CHUNK_CELLS: 50000, // 1回に読むセルの数の上限(行数 = これ ÷ 列数)
@@ -44,6 +47,8 @@ const LT = {
   BASELINE_NAME_HINT: /(支給|給与|売上|各店|集計|合計)/, // 比較対象の候補にするシート名
   BASELINE_CHUNK_CELLS: 20000,
   COMPARE_MAX_DETAILS: 500, // 比較結果に書く「違うセル」の最大数
+  // 11. 所要時間: 試験用コピーの中の「変更後」と「変更前」のシート(同じ形)を交互に再計算させる
+  TIMING: { SHEETS: ['001', '001_変更前'], CELL: 'K6', READ_RANGE: 'A1:AR77', ROUNDS: 3 },
 };
 
 const LT_ROLES = {
@@ -70,6 +75,7 @@ const S = {
   TARGETS: '比較対象',
   BASE: '比較基準一覧',
   RESULT: '比較結果',
+  TIMING: '所要時間',
   WORK: '_作業_状態',
   ROWFP: '_作業_行指紋',
 };
@@ -114,8 +120,10 @@ function onOpen() {
     .addItem('自動の続きをオフにする', 'lt_autoOff')
     .addSeparator()
     .addItem('8. 比較する場所の候補を作る', 'lt_baselineCandidates')
-    .addItem('9. 比較基準(今の値)を記録する(変更しない)', 'lt_baselineRecord')
-    .addItem('10. 今の値を比較基準と比べる(変更しない)', 'lt_baselineCompare')
+    .addItem('9. 比較基準を保管用(変更前)から記録する(変更しない)', 'lt_baselineRecord')
+    .addItem('10. 試験用コピーを比較基準と比べる(変更しない)', 'lt_baselineCompare')
+    .addSeparator()
+    .addItem('11. 所要時間を測る(試験用コピーだけ・入れ直して戻す)', 'lt_timing')
     .addToUi();
 }
 
@@ -129,7 +137,8 @@ function ensureGuideSheet_() {
   const lines = [
     ['歩合表 軽量化ツール ' + LT.VERSION],
     [''],
-    ['この版は「読むだけ」です。本番・保管用・試験用コピーには何も書き込みません。結果はこのファイルに書きます。'],
+    ['1〜10 は「読むだけ」です。本番・保管用・試験用コピーには何も書き込みません。結果はこのファイルに書きます。'],
+    ['11 だけは試験用コピーのセルを一時的に入れ直し、毎回もとに戻します(本番・保管用には書き込みません)。'],
     [''],
     ['手順(メニュー「' + LT.MENU + '」から)'],
     ['1. 対象ファイルを登録する …… 本番・保管用バックアップ・試験用コピーの URL を貼る'],
@@ -139,7 +148,8 @@ function ensureGuideSheet_() {
     ['4. 詳しい診断 …… 少しずつ読む。約4.5分で区切ったら、同じメニューをもう一度押して続ける → 最後に「' + S.SUMMARY + '」'],
     ['   自動の続きは最初はオフ。小さな試験と手動の1回分を確かめてから「自動の続きをオンにする」で有効にする'],
     ['5. 進み具合を見る / 6. 止める / 7. 最初からやり直す'],
-    ['8〜10. 比較基準 …… 大事な集計の場所を「' + S.TARGETS + '」に書き、今の値を記録する。あとで比べる'],
+    ['8〜10. 比較基準 …… 大事な集計の場所を「' + S.TARGETS + '」に書き、保管用(変更前)の値を記録する。試験用コピーと比べる'],
+    ['11. 所要時間 …… 試験用コピーの「' + LT.TIMING.SHEETS.join('」と「') + '」を交互に再計算させ、かかった時間を比べる → シート「' + S.TIMING + '」'],
     [''],
     ['注意'],
     ['・詳しい診断の間は、試験用コピーを編集しないでください(結果がずれます)。'],
@@ -1646,7 +1656,7 @@ function lt_baselineCandidates() {
       activate_(sh);
       return notify_('8. 比較する場所の候補', ['シート「' + S.TARGETS + '」にはもう行があります。直接書き直してください。', '(2行目より下を消してからもう一度実行すると、候補を作り直します)']);
     }
-    const f = openRole_('TEST');
+    const f = openRole_('BACKUP'); // 比較基準は保管用(変更前の状態)から取る
     const names = f.ss.getSheets().filter((s) => s.getType() === SpreadsheetApp.SheetType.GRID).map((s) => s.getName());
     const rows = [];
     if (names.indexOf(LT.REPRESENTATIVE_SHEET) >= 0) rows.push([true, LT.REPRESENTATIVE_SHEET, '', '代表の人別シート(金額・時間・表示)', '代表シート']);
@@ -1678,10 +1688,12 @@ function lt_baselineRecord() {
   const title = '9. 比較基準を記録';
   withLock_(title, () => {
     const props = PropertiesService.getScriptProperties();
-    const test = openRole_('TEST');
+    // 基準は保管用(変更前の状態)から取る。試験用コピーは軽量化の試験で変えるので、基準には使わない
+    const src = openRole_('BACKUP');
     const prod = openRole_('PROD');
+    const test = openRole_('TEST');
     let job = JSON.parse(props.getProperty('LT_BASELINE_JOB') || 'null');
-    if (job && job.testId !== test.id) {
+    if (job && job.srcId !== src.id) {
       props.deleteProperty('LT_BASELINE_JOB');
       job = null;
     }
@@ -1691,9 +1703,10 @@ function lt_baselineRecord() {
       const resolved = [];
       const problems = [];
       items.forEach((it) => {
-        const sh = test.ss.getSheetByName(it.sheet);
-        if (!sh) return problems.push('試験用コピーに「' + it.sheet + '」がない');
+        const sh = src.ss.getSheetByName(it.sheet);
+        if (!sh) return problems.push('保管用に「' + it.sheet + '」がない');
         if (!prod.ss.getSheetByName(it.sheet)) problems.push('本番に「' + it.sheet + '」がない(本番との比較は「未比較」になる)');
+        if (!test.ss.getSheetByName(it.sheet)) problems.push('試験用コピーに「' + it.sheet + '」がない(「10.」で比べられない)');
         try {
           const rg = it.a1 ? sh.getRange(it.a1) : sh.getRange(1, 1, Math.max(1, sh.getLastRow()), Math.max(1, sh.getLastColumn()));
           resolved.push({ sheet: it.sheet, a1: rg.getA1Notation(), row: rg.getRow(), col: rg.getColumn(), rows: rg.getNumRows(), cols: rg.getNumColumns(), memo: it.memo });
@@ -1704,20 +1717,21 @@ function lt_baselineRecord() {
       if (!resolved.length) return notify_(title, ['記録できる範囲がありません。'].concat(problems));
       const cells = resolved.reduce((t, r) => t + r.rows * r.cols, 0);
       const ok = confirm_(title, [
-        '対象ファイル: ' + test.name + '(試験用コピー)と ' + prod.name + '(本番)',
+        '基準を取るファイル: ' + src.name + '(保管用バックアップ=変更前の状態)',
+        '比べるファイル: ' + prod.name + '(本番。コピーのあとに本番が変わったかを見る)',
         '対象: ' + resolved.length + ' か所 / ' + fmtNum_(cells) + ' セル',
       ].concat(resolved.slice(0, 15).map((r) => '・' + r.sheet + '!' + r.a1)).concat(resolved.length > 15 ? ['…ほか ' + (resolved.length - 15) + ' か所'] : []).concat([
         '',
-        '変更内容: なし(読むだけ)。試験用コピーの値をこのファイルに記録し、本番と同じかも比べます。',
+        '変更内容: なし(読むだけ)。保管用の値をこのファイルに記録し、本番と同じかも比べます。',
         '復旧方法: 不要(対象ファイルは変更しません)',
       ]).concat(problems.length ? ['', '注意:'].concat(problems) : []).concat(['', '記録しますか?']));
       if (!ok) return;
-      job = { setId: Utilities.formatDate(new Date(), tz_(), 'yyyyMMdd_HHmmss'), items: resolved, next: 0, testId: test.id };
+      job = { setId: Utilities.formatDate(new Date(), tz_(), 'yyyyMMdd_HHmmss'), items: resolved, next: 0, srcId: src.id };
       props.setProperty('LT_BASELINE_JOB', JSON.stringify(job));
     }
     const t0 = Date.now();
     while (job.next < job.items.length && Date.now() - t0 < LT.TIME_LIMIT_MS - 30000) {
-      recordBaselineItem_(job, job.next, test, prod);
+      recordBaselineItem_(job, job.next, src, prod);
       job.next++;
       props.setProperty('LT_BASELINE_JOB', JSON.stringify(job));
     }
@@ -1735,14 +1749,15 @@ function lt_baselineRecord() {
       done ? '記録しました。基準の名前: ' + job.setId : '時間で区切りました。もう一度「9.」を押すと続きを記録します(' + job.next + ' / ' + job.items.length + ')。',
       '',
       '結果はシート「' + S.BASE + '」です。',
-      diffs.length ? '本番と試験用コピーで値が違う場所が ' + diffs.length + ' か所あります。コピーのあとに本番を編集したか、IMPORTRANGE などの許可待ちが考えられます。' : '記録した範囲では、本番と試験用コピーの値は同じでした。',
+      diffs.length ? '本番と保管用で値が違う場所が ' + diffs.length + ' か所あります。コピーのあとに本番を編集したか、IMPORTRANGE などの許可待ちが考えられます。' : '記録した範囲では、本番と保管用の値は同じでした。',
+      done ? '次は「10. 試験用コピーを比較基準と比べる」です。' : '',
     ]);
   });
 }
 
-function recordBaselineItem_(job, idx, test, prod) {
+function recordBaselineItem_(job, idx, src, prod) {
   const it = job.items[idx];
-  const tSh = test.ss.getSheetByName(it.sheet);
+  const tSh = src.ss.getSheetByName(it.sheet);
   const pSh = prod.ss.getSheetByName(it.sheet);
   const step = Math.max(1, Math.floor(LT.BASELINE_CHUNK_CELLS / it.cols));
   const data = [];
@@ -1862,13 +1877,119 @@ function lt_baselineCompare() {
     log_(title, 'メニュー', '違うセル ' + totalDiff, setId);
     activate_(sh);
     notify_(title + '(変更なし)', [
-      '基準: ' + setId,
+      '基準: ' + setId + '(保管用=変更前の状態から記録した値)',
+      '比べたファイル: ' + test.name + '(試験用コピー)',
       '違うセルの合計: ' + totalDiff + (details.length >= LT.COMPARE_MAX_DETAILS ? '(詳細は最初の ' + LT.COMPARE_MAX_DETAILS + ' 件だけ)' : ''),
       '',
       '結果はシート「' + S.RESULT + '」です。',
       'TODAY() などを使うセルは、日付が変わると違いとして出ます。',
     ]);
   });
+}
+
+// ============================================================
+// 11. 所要時間(試験用コピーだけ。数式を同じ値になる書き方に一時的に替え、毎回もとに戻す)
+// ============================================================
+
+const H_TIMING = ['日時', '回', 'シート', 'セル', '再計算〜読み取り(ミリ秒)', '読むだけ(ミリ秒)', '値は変更前と同じか', 'メモ'];
+
+function lt_timing() {
+  const title = '11. 所要時間を測る';
+  const ids = { PROD: getId_('PROD'), BACKUP: getId_('BACKUP'), TEST: getId_('TEST') };
+  if (!ids.TEST) return notify_(title, ['先に「1. 対象ファイルを登録する」を実行してください。']);
+  if (ids.TEST === ids.PROD || ids.TEST === ids.BACKUP) return notify_(title, ['試験用コピーが本番か保管用と同じファイルです。この処理は実行しません。']);
+  withLock_(title, () => {
+    const cfg = LT.TIMING;
+    const t = openRole_('TEST');
+    const sheets = cfg.SHEETS.map((n) => t.ss.getSheetByName(n));
+    const missing = cfg.SHEETS.filter((n, i) => !sheets[i]);
+    if (missing.length) return notify_(title, ['試験用コピーに次のシートがありません: ' + missing.join('、'), '「変更後」と「変更前」の2枚を用意してから実行してください。']);
+    const cells = sheets.map((sh) => sh.getRange(cfg.CELL));
+    const originals = cells.map((c) => c.getFormula());
+    if (originals.some((f) => !f)) return notify_(title, ['「' + cfg.CELL + '」が数式でないシートがあります。この処理は数式のセルだけを入れ直します。']);
+    const ok = confirm_(title, [
+      '対象ファイル: ' + t.name + '(試験用コピー。ID の末尾 …' + t.id.slice(-6) + ')',
+      '対象: ' + cfg.SHEETS.map((n, i) => '「' + n + '」!' + cfg.CELL + '(今の数式 ' + originals[i] + ')').join(' / '),
+      '件数: ' + cfg.SHEETS.length + ' セル × ' + cfg.ROUNDS + ' 回(1回につき 書き方を替える → 元に戻す の2回の再計算)',
+      '変更内容: 数式を丸かっこで囲んだ同じ値の書き方に替えて再計算させ、' + cfg.READ_RANGE + ' の値を読み終わるまでの時間を測ります。毎回もとの数式に戻します。',
+      '本番・保管用には書き込みません。',
+      '復旧方法: 終わったら元の数式に戻ったかを確かめます。戻っていなければ、上の「今の数式」をそのセルに入れ直してください。',
+      '',
+      '始めますか?(数分かかることがあります。終わるまで試験用コピーを編集しないでください)',
+    ]);
+    if (!ok) return;
+    // 6分の上限で強制終了されると finally が動かないので、先に元の数式を記録しておく(復旧用)
+    log_(title, 'メニュー', '開始', '元の数式: ' + cfg.SHEETS.map((n, i) => n + '!' + cfg.CELL + ' ' + originals[i]).join(' / '));
+    const t0 = Date.now();
+    const rows = [];
+    const before = sheets.map((sh) => sh.getRange(cfg.READ_RANGE).getValues());
+    const ms = cfg.SHEETS.map(() => []);
+    let stopped = '';
+    try {
+      for (let r = 1; r <= cfg.ROUNDS && !stopped; r++) {
+        const order = r % 2 ? cfg.SHEETS.map((_, i) => i) : cfg.SHEETS.map((_, i) => i).reverse(); // 順番の影響を減らす
+        for (const i of order) {
+          if (Date.now() - t0 > LT.TIME_LIMIT_MS - 60000) {
+            stopped = '時間の都合で ' + r + ' 回目の途中で止めた';
+            break;
+          }
+          const sh = sheets[i];
+          let s = Date.now();
+          sh.getRange(cfg.READ_RANGE).getValues();
+          const readOnly = Date.now() - s;
+          [['=(' + originals[i].slice(1) + ')', '書き方を替えたとき'], [originals[i], '元の数式に戻したとき']].forEach(([f, memo]) => {
+            s = Date.now();
+            cells[i].setFormula(f);
+            SpreadsheetApp.flush();
+            const v = sh.getRange(cfg.READ_RANGE).getValues();
+            const took = Date.now() - s;
+            ms[i].push(took);
+            rows.push([nowText_(), r, cfg.SHEETS[i], cfg.CELL, took, memo === '書き方を替えたとき' ? readOnly : '', sameGrid_(before[i], v) ? '同じ' : '違う', memo]);
+          });
+        }
+      }
+    } finally {
+      cells.forEach((c, i) => {
+        if (c.getFormula() !== originals[i]) c.setFormula(originals[i]);
+      });
+      SpreadsheetApp.flush();
+    }
+    const restored = cells.every((c, i) => c.getFormula() === originals[i]);
+    const med = ms.map(median_);
+    const summary = cfg.SHEETS.map((n, i) => ['まとめ', ms[i].length + ' 回', n, cfg.CELL, med[i], '', '', '中央値(ミリ秒)']);
+    const ratio = med[0] && med[1] ? Math.round((med[0] / med[1]) * 1000) / 10 : '';
+    summary.push(['まとめ', '', '比', '', ratio === '' ? '' : ratio + '%', '', '', '「' + cfg.SHEETS[0] + '」÷「' + cfg.SHEETS[1] + '」(小さいほど速い)']);
+    summary.push(['まとめ', '', '元に戻ったか', '', restored ? '戻った' : '戻っていない', '', '', stopped || '最後まで測った']);
+    const sh = writeTable_(S.TIMING, H_TIMING, summary.concat(rows));
+    log_(title, 'メニュー', restored ? '完了' : '要確認: 元の数式に戻っていない', cfg.SHEETS.map((n, i) => n + ' ' + med[i] + 'ms').join(' / ') + (ratio === '' ? '' : ' 比 ' + ratio + '%'));
+    activate_(sh);
+    const changed = rows.filter((x) => x[6] !== '同じ').length;
+    notify_(title, [
+      cfg.SHEETS.map((n, i) => '「' + n + '」: 中央値 ' + med[i] + ' ミリ秒(' + ms[i].length + ' 回)').join('\n'),
+      ratio === '' ? '' : '比: ' + ratio + '%(小さいほど速い)',
+      '',
+      restored ? '入れ直したセルは、すべて元の数式に戻りました。' : '⚠ 元の数式に戻っていないセルがあります。シート「' + S.TIMING + '」を確認してください。',
+      changed ? '⚠ 値が変更前と違った回が ' + changed + ' 回あります(TODAY() などの影響か確認が必要)。' : '値は毎回、変更前と同じでした。',
+      '',
+      '結果はシート「' + S.TIMING + '」です。時間は Google 側の混み具合でも変わるので、1回だけで判断しないでください。',
+    ]);
+  });
+}
+
+function median_(list) {
+  if (!list.length) return '';
+  const a = list.slice().sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : Math.round((a[m - 1] + a[m]) / 2);
+}
+
+function sameGrid_(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].length !== b[i].length) return false;
+    for (let j = 0; j < a[i].length; j++) if (cellKey_(a[i][j]) !== cellKey_(b[i][j])) return false;
+  }
+  return true;
 }
 
 function readTargets_() {
@@ -1999,7 +2120,7 @@ function withLock_(title, fn) {
     return fn();
   } catch (e) {
     log_(title, '', 'エラー', errText_(e));
-    notify_(title, ['エラーで止まりました。', errText_(e), '', 'この版は対象ファイルに書き込まないので、対象ファイルは変わっていません。']);
+    notify_(title, ['エラーで止まりました。', errText_(e), '', '1〜10 は対象ファイルに書き込まないので、対象ファイルは変わっていません。', '11 の途中で止まったときは、入れ直したセルを元の数式に戻してから止めます(シート「' + S.TIMING + '」とログで確認できます)。']);
   } finally {
     lock.releaseLock();
   }

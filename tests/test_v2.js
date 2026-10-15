@@ -171,6 +171,7 @@ const sameAsBaseline = (env) => {
 function noProblems(env) {
   assert.deepStrictEqual(env.violations, [], '用意していないメソッドや対象への書き込みがあった');
   assert.deepStrictEqual(env.formulaWrites, [], 'ツールのファイルに数式として書き込まれた文字列がある');
+  if (!env.allowTargetWrites) assert.deepStrictEqual(env.targetWrites, [], '対象ファイルに書き込んだ');
   const errs = env.alerts.filter((a) => /エラーで止まりました/.test(a.msg));
   assert.deepStrictEqual(errs.map((a) => a.msg), [], 'エラーの画面が出た');
 }
@@ -520,6 +521,72 @@ test('比較基準: 候補 → 記録(本番との違いも) → 比較(変化�
   assert.strictEqual(diff[6], '777');
   assert.strictEqual(res.filter((r) => r[4] === '違いあり').length, 1);
   noProblems(env);
+});
+
+test('比較基準: 基準は保管用(変更前)から取る。記録の前に試験用コピーを変えても、比較で違いが出る', () => {
+  const env = newEnv();
+  const S = env.ctx.S;
+  env.ctx.lt_baselineCandidates();
+  env.testSpec.sheets.find((x) => x.name === '001').v[13][6] = 555; // 軽量化の試験で試験用コピーを先に変えた想定
+  env.ctx.lt_baselineRecord();
+  const b1 = rowOf(env, S.BASE, 3, '001');
+  assert.strictEqual(b1['本番との違い(セル)'], 0, '保管用と本番の 001 は同じ');
+  env.ctx.lt_baselineCompare();
+  const res = env.rows(S.RESULT);
+  const diff = res.find((r) => r[2] === 'F13');
+  assert.ok(diff, '試験用コピーで変えたセルが違いとして出る');
+  assert.strictEqual(diff[6], '555');
+  assert.ok(env.alerts.some((a) => /保管用バックアップ=変更前の状態/.test(a.msg)), '確認画面に基準のファイルが出る');
+  noProblems(env);
+});
+
+// ---------------- 5. 所要時間(試験用コピーだけ書き込む) ----------------
+function timingEnv(opts) {
+  const env = newEnv({
+    tweakTest: (spec) => {
+      spec.writable = true; // 試験用コピーの模擬だけ、1セルの入れ直しを許す
+      const src = spec.sheets.find((x) => x.name === '001');
+      if (!(opts && opts.noBefore)) spec.sheets.push(Object.assign(JSON.parse(JSON.stringify(src)), { name: '001_変更前', id: 1487009999 }));
+      spec.sheets.filter((x) => x.name === '001' || x.name === '001_変更前').forEach((s) => put(s, 6, 11, "='000'!K6", '9月'));
+    },
+  });
+  env.ctx.LT.TIMING.READ_RANGE = 'A1:T55';
+  env.allowTargetWrites = true;
+  return env;
+}
+
+test('所要時間: 試験用コピーの2枚だけを入れ直し、毎回もとの数式に戻す', () => {
+  const env = timingEnv();
+  env.ctx.lt_timing();
+  const S = env.ctx.S;
+  const w = env.targetWrites;
+  assert.strictEqual(w.length, 2 * 3 * 2, '2枚 × 3回 × (替える+戻す)');
+  assert.ok(w.every((x) => x[0] === ID.TEST && (x[1] === '001' || x[1] === '001_変更前') && x[2] === 'K6'), '試験用コピーの K6 だけ');
+  assert.ok(w.filter((x, i) => i % 2 === 0).every((x) => x[3] === "=('000'!K6)"), '替えるときは丸かっこで囲む');
+  assert.ok(w.filter((x, i) => i % 2 === 1).every((x) => x[3] === "='000'!K6"), '毎回もとの数式に戻す');
+  ['001', '001_変更前'].forEach((n) => assert.strictEqual(env.testSpec.sheets.find((x) => x.name === n).f[6][11], "='000'!K6"));
+  const rows = env.rows(S.TIMING);
+  assert.ok(rows.some((r) => r[2] === '元に戻ったか' && r[4] === '戻った'));
+  assert.ok(rows.filter((r) => r[0] !== 'まとめ' && r[0] !== '日時').every((r) => r[6] === '同じ'));
+  assert.ok(env.alerts.some((a) => /今の数式 ='000'!K6/.test(a.msg) && /復旧方法/.test(a.msg)), '確認画面に対象・変更内容・復旧方法');
+  noProblems(env);
+});
+
+test('所要時間: 「いいえ」なら書き込まない / 変更前のシートがなければ書き込まない / 本番・保管用は書けない', () => {
+  let env = timingEnv();
+  env.answer = 'NO';
+  env.ctx.lt_timing();
+  assert.deepStrictEqual(env.targetWrites, []);
+  env = timingEnv({ noBefore: true });
+  env.ctx.lt_timing();
+  assert.deepStrictEqual(env.targetWrites, []);
+  assert.ok(env.alerts.some((a) => /001_変更前/.test(a.msg)));
+  noProblems(env);
+  // 本番の模擬は writable ではないので、書こうとすると例外になる(ツールの外からの確認)
+  env = newEnv();
+  const prodSheet = env.targets[ID.PROD].getSheetByName('001');
+  assert.throws(() => prodSheet.getRange('K6').setFormula('=1'), /対象ファイルへの書き込み/);
+  env.violations.length = 0;
 });
 
 console.log('\nすべての試験に合格: ' + passed + ' 件');

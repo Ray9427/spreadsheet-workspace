@@ -50,6 +50,7 @@ function createEnv(opts) {
     now: Date.UTC(2026, 9, 15, 1, 0, 0),
     violations: [],
     formulaWrites: [],
+    targetWrites: [],
     errorWrites: [],
     logs: [],
     alerts: [],
@@ -216,9 +217,22 @@ function createEnv(opts) {
         }
         return out;
       };
+      // 11. 所要時間の試験のためだけに、writable を付けた模擬ファイルの1セルの数式を入れ直せる(それ以外は例外)
+      const setFormula = (f) => {
+        tick(1);
+        if (!spec.writable || nr !== 1 || nc !== 1) {
+          env.violations.push('setFormula ' + spec.name + '!' + s.name);
+          throw new Error('MOCK: 対象ファイルへの書き込み ' + spec.name + '!' + s.name + '!' + a1(r, c, nr, nc));
+        }
+        (s.f[r] = s.f[r] || {})[c] = f;
+        env.targetWrites.push([spec.id, s.name, a1(r, c, 1, 1), f]);
+        return rangeOf(r, c, 1, 1);
+      };
       return strict(
         {
           getFormulas: () => get('f'),
+          getFormula: () => get('f')[0][0],
+          setFormula,
           getValues: () => get('v'),
           getDisplayValues: () => get('d'),
           getDataValidations: () => get('dv'),
@@ -310,6 +324,7 @@ function createEnv(opts) {
   const SpreadsheetApp = {
     getActive: () => toolSs,
     getActiveSpreadsheet: () => toolSs,
+    flush: () => tick(),
     openById: (id) => {
       tick(1000);
       if (!env.targets[id]) throw new Error('MOCK: ファイルが見つからない ' + id);
