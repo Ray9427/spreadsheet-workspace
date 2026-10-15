@@ -198,3 +198,17 @@ mkdir -p ~/Documents/spreadsheet-workspace/{input,output,scripts/work,.claude}
 cd $HOME\Documents
 mkdir spreadsheet-workspace\input, spreadsheet-workspace\output, spreadsheet-workspace\scripts\work, spreadsheet-workspace\.claude
 ```
+
+---
+
+## 歩合表の軽量化(Google Apps Script)
+
+Google スプレッドシートの歩合表を軽くするための道具と資料です。本番の実データ・ファイル ID は入れていません。
+
+| 場所 | 内容 |
+|---|---|
+| `docs/手順書_1_バックアップと診断.md` | 最初にやること(バックアップと、変更しない診断)のクリック単位の手順 |
+| `docs/報告_v2.md` | v1 の監査、v2 の作り、検証結果、外部連携の検討、判断してほしいこと |
+| `gas/軽量化ツール_v2.gs` | 診断ツールのコード(新しい軽いスプレッドシートの Apps Script に貼る) |
+| `gas/v1_参考_使わない/` | 以前の v1。監査の結果、使わない |
+| `tests/` | ローカル試験(`node tests/test_v2.js`。匿名の作り物のデータだけを使う) |
