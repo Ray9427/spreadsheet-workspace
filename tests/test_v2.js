@@ -118,6 +118,7 @@ function newEnv(opts) {
   }
   env.prompts.push(url(ID.PROD), url(ID.BACKUP), url(ID.TEST));
   env.ctx.lt_setup();
+  if (opts.auto) env.props.LT_AUTO = '1'; // 自動の続きをオンにした状態(既定はオフ)
   return env;
 }
 
@@ -331,7 +332,7 @@ test('詳しい診断: 1回で最後まで', () => {
 });
 
 test('詳しい診断: 時間で区切り、自動で続ける(結果は1回で通したときと同じ)', () => {
-  const env = newEnv({ timeLimit: 4000 });
+  const env = newEnv({ timeLimit: 4000, auto: true });
   env.ctx.lt_diagStart();
   const r = runToEnd(env);
   assert.strictEqual(state(env).phase, 'done');
@@ -343,7 +344,7 @@ test('詳しい診断: 時間で区切り、自動で続ける(結果は1回で�
 });
 
 test('詳しい診断: 途中でエラーが起きても、再開すれば重複なく同じ結果', () => {
-  const env = newEnv({ timeLimit: 4000 });
+  const env = newEnv({ timeLimit: 4000, auto: true });
   env.ctx.lt_diagStart();
   env.fireDueTriggers();
   env.failToolWriteAt = env.toolWrites + 4; // 次の実行の途中で書き込みを1回失敗させる
@@ -359,7 +360,7 @@ test('詳しい診断: 途中でエラーが起きても、再開すれば重複
 });
 
 test('診断を止める: 予約を消し、新しい処理を始めない / 4. で再開できる', () => {
-  const env = newEnv({ timeLimit: 4000 });
+  const env = newEnv({ timeLimit: 4000, auto: true });
   env.ctx.lt_diagStart();
   assert.strictEqual(env.triggers.length, 1);
   const before = state(env);
@@ -373,6 +374,92 @@ test('診断を止める: 予約を消し、新しい処理を始めない / 4. 
   runToEnd(env);
   assert.strictEqual(state(env).phase, 'done');
   sameAsBaseline(env);
+  noProblems(env);
+});
+
+test('既定では自動の続きはオフ: 区切っても予約を作らず、手動で続ければ同じ結果', () => {
+  const env = newEnv({ timeLimit: 4000 });
+  env.ctx.lt_diagStart();
+  assert.strictEqual(env.triggers.length, 0, '既定では予約を作らない');
+  assert.notStrictEqual(state(env).phase, 'done', '1回では終わらない大きさで試す');
+  assert.ok(env.alerts.some((a) => /もう一度押してください/.test(a.msg)), '手動で続ける案内を出す');
+  const qi = state(env).qi;
+  const runs = state(env).runs;
+  env.ctx.ScriptApp.newTrigger('lt_diagContinueTrigger').timeBased().after(1000).create(); // 前の版の予約が残っていても
+  env.fireDueTriggers();
+  assert.strictEqual(state(env).runs, runs, 'オフのときは予約から実行しない');
+  assert.strictEqual(state(env).qi, qi);
+  assert.ok(env.rows(env.ctx.S.LOG).some((r) => r[3] === '自動の続きがオフのため実行しない'));
+  let n = 0;
+  while (state(env).phase !== 'done' && n++ < 200) env.ctx.lt_diagStart();
+  assert.strictEqual(state(env).phase, 'done');
+  assert.strictEqual(env.triggers.length, 0);
+  sameAsBaseline(env);
+  noProblems(env);
+});
+
+test('小さな試験: 代表シートだけを読み、予約を作らず、詳しい診断の状態を変えない', () => {
+  const read = new Set();
+  const env = newEnv({
+    tweakTest: (spec) => spec.sheets.forEach((s) => (s.fail = () => (read.add(s.name), false))),
+  });
+  env.ctx.lt_smallTest();
+  assert.deepStrictEqual([...read], ['001'], '読んだのは代表シートだけ');
+  assert.strictEqual(env.triggers.length, 0);
+  assert.strictEqual(env.props.LT_STATE, undefined, '詳しい診断の状態を作らない');
+  const S = env.ctx.S;
+  const val = (item) => {
+    const r = env.rows(S.SMALL).find((x) => x[0] === item);
+    if (!r) throw new Error('行がない: ' + item);
+    return r[1];
+  };
+  assert.strictEqual(val('結果'), '最後まで読めた');
+  assert.strictEqual(val('数式のセル'), 319 + 60 + 9 + 1, '詳しい診断の 001 と同じ数');
+  assert.strictEqual(val('列全体参照'), '13 種類 / ' + (319 * 7 + 60 * 6) + ' 個');
+  assert.strictEqual(val('SUMIFS'), 319);
+  assert.strictEqual(val('FILTER'), 60);
+  assert.strictEqual(val('自動の続きの予約'), '0 件');
+  assert.ok(env.rows(S.SMALL).find((x) => x[0] === '数式を読む(getFormulas)')[2] >= 0, '所要ミリ秒を書く');
+  assert.ok(env.props.LT_SMALL_OK, '成功を記録する');
+  noProblems(env);
+
+  // 途中で詳しい診断をしていても、その状態は変えない
+  const env2 = newEnv({ timeLimit: 4000 });
+  env2.ctx.lt_diagStart();
+  const before = env2.props.LT_STATE;
+  env2.ctx.lt_smallTest();
+  assert.strictEqual(env2.props.LT_STATE, before);
+  assert.strictEqual(env2.triggers.length, 0);
+  noProblems(env2);
+
+  // 代表シートがなければ、エラーとして記録する(対象は変えない)
+  const env3 = newEnv({ tweakTest: (spec) => (spec.sheets.find((s) => s.name === '001').name = '001_旧') });
+  env3.ctx.lt_smallTest();
+  assert.strictEqual(env3.rows(S.SMALL).find((x) => x[0] === '結果')[1], 'エラーで止まった');
+  assert.strictEqual(env3.props.LT_SMALL_OK, undefined);
+  assert.deepStrictEqual(env3.violations, []);
+});
+
+test('自動の続きのオン・オフ: 確認前は注意を出す / オフで予約を消す', () => {
+  const env = newEnv({ timeLimit: 4000 });
+  env.ctx.lt_autoOn();
+  const msg = env.alerts[env.alerts.length - 2].msg; // 確認の画面(最後は「オンにしました」)
+  assert.ok(/小さな試験」がまだ/.test(msg) && /手動で1回も/.test(msg), msg);
+  assert.strictEqual(env.props.LT_AUTO, '1');
+  env.ctx.lt_diagStart();
+  assert.strictEqual(env.triggers.length, 1, 'オンなら予約を作る');
+  env.ctx.lt_autoOff();
+  assert.strictEqual(env.triggers.length, 0, 'オフで予約を消す');
+  assert.strictEqual(env.props.LT_AUTO, undefined);
+
+  env.ctx.lt_smallTest();
+  env.ctx.lt_autoOn();
+  const msg2 = env.alerts[env.alerts.length - 2].msg;
+  assert.ok(!/注意:/.test(msg2), '小さな試験と手動1回のあとは注意なし: ' + msg2);
+  env.answer = 'NO';
+  env.ctx.lt_autoOff();
+  env.ctx.lt_autoOn();
+  assert.strictEqual(env.props.LT_AUTO, undefined, '「いいえ」ならオンにしない');
   noProblems(env);
 });
 

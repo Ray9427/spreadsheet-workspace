@@ -9,8 +9,12 @@
  *   1. 対象ファイルの登録 …… 本番・保管用バックアップ・試験用コピーの URL をメニューから登録する
  *   2. バックアップの確認 …… 3つのファイルが開けるか、シートの構成が同じかを調べる
  *   3. 軽い診断 …………… シート名・sheetId・表示状態・行数・列数などだけを一覧にする
+ *   小さな試験 ………… 代表シート1枚だけを読み、読み取りにかかった時間を測る(予約を作らない)
  *   4. 詳しい診断 ………… シートを少しずつ読み、数式・参照・入力規則などを数える(止めても続きから)
  *   8〜10. 比較基準 ……… 大事な集計の値を記録しておき、あとで変わっていないかを比べる
+ *
+ *   自動の続き(時間で区切ったあと、予約で続きを実行する)は、最初はオフです。
+ *   小さな試験と、手動での「4.」1回分を確かめてから、メニューでオンにします。
  *
  * 安全のための約束
  *   ・この版の処理は、本番・保管用・試験用コピーのどれにも書き込みません(読むだけ)。
@@ -19,7 +23,7 @@
  */
 
 const LT = {
-  VERSION: 'v2.0(2026-10-15)診断版',
+  VERSION: 'v2.1(2026-10-15)診断版',
   MENU: '🛠 軽量化ツール',
   REPRESENTATIVE_SHEET: '001', // 構造を比べるときの基準にするシート
   CHUNK_CELLS: 50000, // 1回に読むセルの数の上限(行数 = これ ÷ 列数)
@@ -29,7 +33,7 @@ const LT = {
   FINALIZE_RESERVE_MS: 60 * 1000, // 最後のまとめのために残しておく時間
   FLUSH_EVERY_SHEETS: 10, // 診断結果をこの枚数ごとに書き出す
   FLUSH_EVERY_MS: 60 * 1000, // または、この時間ごとに書き出す
-  AUTO_CONTINUE: true, // 時間で区切ったとき、自動で続きを実行する
+  // 自動の続きのオン・オフは、メニューで切り替える(スクリプト プロパティ LT_AUTO。最初はオフ)
   CONTINUE_AFTER_MS: 60 * 1000, // 続きを実行するまでの待ち時間
   READ_VALUES: true, // 計算結果の値も読む(false にすると数式と入力規則だけを調べる)
   SCAN_VALIDATIONS: true, // 入力規則を数える
@@ -61,6 +65,7 @@ const S = {
   EXT: '外部・動的参照',
   STRUCT: '構造の比較',
   SUMMARY: '診断サマリー',
+  SMALL: '小さな試験',
   LOG: '進捗ログ',
   TARGETS: '比較対象',
   BASE: '比較基準一覧',
@@ -99,10 +104,14 @@ function onOpen() {
     .addItem('2. バックアップと試験用コピーを確認する(変更しない)', 'lt_checkBackup')
     .addSeparator()
     .addItem('3. 軽い診断:シート一覧(変更しない)', 'lt_diagLight')
+    .addItem('3b. 小さな試験:代表シート1枚だけ読む(変更しない)', 'lt_smallTest')
     .addItem('4. 詳しい診断を始める/続ける(変更しない)', 'lt_diagStart')
     .addItem('5. 診断の進み具合を見る', 'lt_diagProgress')
     .addItem('6. 診断を止める', 'lt_diagStop')
     .addItem('7. 詳しい診断を最初からやり直す', 'lt_diagRestart')
+    .addSeparator()
+    .addItem('自動の続きをオンにする(小さな試験と手動1回の確認後)', 'lt_autoOn')
+    .addItem('自動の続きをオフにする', 'lt_autoOff')
     .addSeparator()
     .addItem('8. 比較する場所の候補を作る', 'lt_baselineCandidates')
     .addItem('9. 比較基準(今の値)を記録する(変更しない)', 'lt_baselineRecord')
@@ -126,7 +135,9 @@ function ensureGuideSheet_() {
     ['1. 対象ファイルを登録する …… 本番・保管用バックアップ・試験用コピーの URL を貼る'],
     ['2. バックアップと試験用コピーを確認する …… 3つが開けて、シートの構成が同じかを見る → シート「' + S.SETUP + '」'],
     ['3. 軽い診断 …… シートの一覧だけを作る → シート「' + S.LIST + '」「' + S.FILE + '」'],
-    ['4. 詳しい診断 …… 少しずつ読む。時間で区切ったら1分後に自動で続きを実行する → 最後に「' + S.SUMMARY + '」'],
+    ['3b. 小さな試験 …… 代表シート「' + LT.REPRESENTATIVE_SHEET + '」1枚だけを読み、かかった時間を測る → シート「' + S.SMALL + '」'],
+    ['4. 詳しい診断 …… 少しずつ読む。約4.5分で区切ったら、同じメニューをもう一度押して続ける → 最後に「' + S.SUMMARY + '」'],
+    ['   自動の続きは最初はオフ。小さな試験と手動の1回分を確かめてから「自動の続きをオンにする」で有効にする'],
     ['5. 進み具合を見る / 6. 止める / 7. 最初からやり直す'],
     ['8〜10. 比較基準 …… 大事な集計の場所を「' + S.TARGETS + '」に書き、今の値を記録する。あとで比べる'],
     [''],
@@ -448,7 +459,7 @@ function lt_diagStart() {
       '変更内容: なし(読むだけ)。結果はこのツールのファイルに書きます。',
       '復旧方法: 不要(対象ファイルは変更しません)',
       '',
-      '約4.5分ごとに区切り、' + (LT.AUTO_CONTINUE ? '1分後に自動で続きを実行します。' : '続きは同じメニューをもう一度押します。'),
+      '約4.5分ごとに区切り、' + (autoContinueOn_() ? '1分後に自動で続きを実行します(自動の続き: オン)。' : '続きは同じメニューをもう一度押します(自動の続き: オフ)。'),
       '診断の間は、試験用コピーを編集しないでください。',
       '',
       '始めますか?',
@@ -463,6 +474,10 @@ function lt_diagContinueTrigger() {
   deleteTriggers_(CONTINUE_HANDLER);
   if (PropertiesService.getScriptProperties().getProperty('LT_STOP')) {
     log_('4. 詳しい診断', '自動の続き', '止める指示があるため実行しない', '');
+    return;
+  }
+  if (!autoContinueOn_()) {
+    log_('4. 詳しい診断', '自動の続き', '自動の続きがオフのため実行しない', '');
     return;
   }
   const st = loadState_();
@@ -514,10 +529,167 @@ function lt_diagProgress() {
   lines.push(
     '実行した回数: ' + st.runs + ' 回 / 読み取り ' + st.chunks + ' 回',
     '開始: ' + fmtTime_(st.startedAt) + ' / 最終更新: ' + fmtTime_(st.updatedAt),
-    '自動の続きの予約: ' + (reserved ? 'あり' : 'なし') + (stop ? '(止める指示あり)' : '')
+    '自動の続き: ' + (autoContinueOn_() ? 'オン' : 'オフ') + ' / 予約: ' + (reserved ? 'あり' : 'なし') + (stop ? '(止める指示あり)' : '')
   );
   if (st.errors && st.errors.length) lines.push('', '最近のエラー:', '・' + st.errors.slice(-3).join('\n・'));
   notify_('5. 進み具合', lines);
+}
+
+// ============================================================
+// 3b. 小さな試験(代表シート1枚だけを読み、かかった時間を測る)
+//     予約(トリガー)を作らず、詳しい診断の途中経過(LT_STATE)も変えない
+// ============================================================
+
+const H_SMALL = ['項目', '結果', '所要ミリ秒', 'メモ'];
+
+function lt_smallTest() {
+  const title = '3b. 小さな試験(代表シート1枚)';
+  const testId = getId_('TEST');
+  if (!testId) return notify_(title, ['先に「1. 対象ファイルを登録する」を実行してください。']);
+  const ok = confirm_(title, [
+    '対象ファイル: 試験用コピー(ID の末尾 …' + testId.slice(-6) + ')',
+    '対象シート: 「' + LT.REPRESENTATIVE_SHEET + '」の1枚だけ',
+    '変更内容: なし(読むだけ)。結果はこのツールのファイルのシート「' + S.SMALL + '」に書きます。',
+    '自動の続きの予約は作りません。詳しい診断の途中経過も変えません。',
+    '復旧方法: 不要(対象ファイルは変更しません)',
+    '',
+    '始めますか?',
+  ]);
+  if (!ok) return;
+  withLock_(title, () => runSmallTest_(title));
+}
+
+function runSmallTest_(title) {
+  const t0 = Date.now();
+  const rows = [];
+  const add = (item, result, ms, memo) => rows.push([item, result, ms === '' ? '' : Math.round(ms), memo || '']);
+  let failed = '';
+  try {
+    let s = Date.now();
+    const target = openRole_('TEST');
+    add('試験用コピーを開く', target.name, Date.now() - s, 'ID の末尾 …' + target.id.slice(-6));
+    s = Date.now();
+    const sheets = target.ss.getSheets();
+    add('シートの一覧を取得', sheets.length + ' 枚', Date.now() - s, '');
+    const sheet = sheets.filter((sh) => sh.getName() === LT.REPRESENTATIVE_SHEET)[0];
+    if (!sheet) throw new Error('代表シート「' + LT.REPRESENTATIVE_SHEET + '」が試験用コピーにありません。');
+    s = Date.now();
+    const acc = newAcc_(sheet);
+    add('シートの大きさ', acc.maxRows + ' 行 × ' + acc.maxCols + ' 列' + (acc.hidden ? '(非表示)' : ''), Date.now() - s, 'sheetId ' + acc.sheetId);
+    if (!acc.isGrid) throw new Error('代表シートが表ではありません。');
+    s = Date.now();
+    const fc = fileCache_(target.ss);
+    add('名前付き範囲と保護(ファイル全体)', fc.err.length ? '一部取得できず: ' + fc.err.join('・') : '取得できた', Date.now() - s, '');
+    s = Date.now();
+    scanStructure_(sheet, acc, fc);
+    const st = acc.struct;
+    add('結合・条件付き書式・グラフ・図形', '結合 ' + orBlank_(st.merge) + ' / 条件付き書式 ' + orBlank_(st.cf) + ' / グラフ ' + orBlank_(st.charts) + ' / 図形 ' + orBlank_(st.drawings), Date.now() - s, '');
+
+    // 詳しい診断と同じ区切り(CHUNK_CELLS)で読む。API ごとの時間を分けて測る
+    const ms = { f: 0, v: 0, d: 0, p: 0 };
+    let reads = 0;
+    let cells = 0;
+    const cache = new Map();
+    for (let r0 = 1; r0 <= acc.maxRows; r0 += acc.rowsPerChunk) {
+      if (Date.now() - t0 > LT.TIME_LIMIT_MS) {
+        acc.unscanned.push([r0, acc.maxRows]);
+        acc.notes.push(r0 + '行目から先は時間の都合で読んでいない');
+        break;
+      }
+      const n = Math.min(acc.rowsPerChunk, acc.maxRows - r0 + 1);
+      const range = sheet.getRange(r0, 1, n, acc.maxCols);
+      s = Date.now();
+      const formulas = range.getFormulas();
+      ms.f += Date.now() - s;
+      s = Date.now();
+      const values = acc.readValues ? range.getValues() : null;
+      ms.v += Date.now() - s;
+      s = Date.now();
+      const dvs = LT.SCAN_VALIDATIONS ? range.getDataValidations() : null;
+      ms.d += Date.now() - s;
+      s = Date.now();
+      processChunk_(acc, r0, formulas, values, dvs, cache);
+      ms.p += Date.now() - s;
+      acc.nextRow = r0 + n;
+      reads++;
+      cells += n * acc.maxCols;
+    }
+    const per = reads + ' 回 / ' + fmtNum_(cells) + ' セル';
+    add('数式を読む(getFormulas)', per, ms.f, '1回あたり最大 ' + acc.rowsPerChunk + ' 行');
+    add('値を読む(getValues)', acc.readValues ? per : '読んでいない', ms.v, '');
+    add('入力規則を読む(getDataValidations)', LT.SCAN_VALIDATIONS ? per : '読んでいない', ms.d, '');
+    add('数える(このツールの中の計算)', '', ms.p, '');
+    const colKinds = Object.keys(acc.colRefs).length;
+    let colTotal = 0;
+    for (const k in acc.colRefs) colTotal += acc.colRefs[k];
+    add('数式のセル', acc.formulas, '', '');
+    add('列全体参照', colKinds + ' 種類 / ' + colTotal + ' 個', '', '「A:A」のように列全体を指す参照');
+    ['SUMIFS', 'FILTER', 'TODAY', 'INDIRECT', 'IMPORTRANGE'].forEach((k) => add(k, acc.fn[k] || 0, '', 'この関数を含む数式セルの数'));
+    add('エラー値のセル', acc.readValues ? acc.errors : '未取得', '', '#REF! など');
+    add('読み込み中のセル', acc.readValues ? acc.loading : '未取得', '', '');
+    add('入力規則のセル', LT.SCAN_VALIDATIONS ? acc.dv : '未取得', '', '');
+    add('調べられなかった行', acc.unscanned.length ? acc.unscanned.map((u) => u[0] + '-' + u[1]).join(', ') : 'なし', '', '');
+    add('メモ', acc.notes.length ? acc.notes.join(' / ') : 'なし', '', '');
+  } catch (e) {
+    failed = errText_(e);
+    add('エラー', failed, '', 'ここで止まりました。対象ファイルは変更していません。');
+  }
+  const reserved = ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === CONTINUE_HANDLER).length;
+  add('自動の続きの予約', reserved + ' 件', '', 'この試験では予約を作りません');
+  add('合計', '', Date.now() - t0, 'Google の上限は1回6分');
+  const top = [
+    ['実行日時', nowText_(), '', LT.VERSION],
+    ['結果', failed ? 'エラーで止まった' : '最後まで読めた', '', ''],
+  ];
+  const sh = writeTable_(S.SMALL, H_SMALL, top.concat(rows));
+  const props = PropertiesService.getScriptProperties();
+  if (failed) props.deleteProperty('LT_SMALL_OK');
+  else props.setProperty('LT_SMALL_OK', String(Date.now()));
+  log_(title, 'メニュー', failed ? 'エラー: ' + failed : '完了', '合計 ' + Math.round((Date.now() - t0) / 1000) + ' 秒');
+  activate_(sh);
+  notify_(title + '(変更なし)', [
+    failed ? 'エラーで止まりました: ' + failed : '代表シート「' + LT.REPRESENTATIVE_SHEET + '」を最後まで読めました。',
+    '合計 ' + Math.round((Date.now() - t0) / 1000) + ' 秒。結果はシート「' + S.SMALL + '」です。',
+    '',
+    failed ? '対象ファイルは変更していません。' : '次は「4. 詳しい診断を始める/続ける」を手動で1回押してください。',
+  ]);
+}
+
+// ============================================================
+// 自動の続き(最初はオフ。小さな試験と手動1回分を確かめてからオンにする)
+// ============================================================
+
+function autoContinueOn_() {
+  return PropertiesService.getScriptProperties().getProperty('LT_AUTO') === '1';
+}
+
+function lt_autoOn() {
+  const title = '自動の続きをオンにする';
+  const props = PropertiesService.getScriptProperties();
+  const st = loadState_();
+  const warn = [];
+  if (!props.getProperty('LT_SMALL_OK')) warn.push('・「3b. 小さな試験」がまだ最後まで成功していません。');
+  if (!st || !st.runs) warn.push('・「4. 詳しい診断」をまだ手動で1回も実行していません。');
+  const lines = [
+    'オンにすると、詳しい診断が約4.5分で区切られたとき、1分後に続きを自動で実行する予約(トリガー)を作ります。',
+    '予約は同時に1件までです。診断の完了・止める指示・エラー・3回続けて進まない、のどれかで作らなくなります。',
+    '消し方: 「6. 診断を止める」か「自動の続きをオフにする」。',
+    '対象のファイルは変更しません(読むだけ)。',
+  ];
+  if (warn.length) lines.push('', '注意:', ...warn, '先に確かめることをおすすめします。');
+  lines.push('', 'オンにしますか?');
+  if (!confirm_(title, lines)) return;
+  props.setProperty('LT_AUTO', '1');
+  log_(title, 'メニュー', 'オン', warn.join(' '));
+  notify_(title, ['オンにしました。', '次に「4. 詳しい診断を始める/続ける」を押すと、区切りのあと自動で続きます。']);
+}
+
+function lt_autoOff() {
+  const title = '自動の続きをオフにする';
+  PropertiesService.getScriptProperties().deleteProperty('LT_AUTO');
+  const n = deleteTriggers_(CONTINUE_HANDLER);
+  log_(title, 'メニュー', 'オフ', '予約 ' + n + ' 件を取り消し');
+  notify_(title, ['オフにしました。', '・自動の続きの予約 ' + n + ' 件を取り消しました。', '・続きは「4. 詳しい診断を始める/続ける」を手動で押してください。']);
 }
 
 /** 詳しい診断を1回分(約4.5分)進める */
@@ -621,7 +793,7 @@ function runDiagSlice_(origin) {
   let next = '';
   const stuck = st && st.noProgress >= 3;
   if (stuck) result += '(3回続けて進まなかったので、自動の続きを止めた)';
-  if (!finished && !stopped && !stuck && st && LT.AUTO_CONTINUE && result.indexOf('エラー') < 0) {
+  if (!finished && !stopped && !stuck && st && autoContinueOn_() && result.indexOf('エラー') < 0) {
     scheduleContinue_();
     next = '1分後に自動で続きを実行します。';
   }
