@@ -1,0 +1,15 @@
+{
+  "language": "japanese",
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/*)",
+      "Bash(python scripts/*)",
+      "Bash(py scripts/*)",
+      "Bash(markitdown *)",
+      "Edit(output/**)"
+    ],
+    "deny": [
+      "Edit(input/**)"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Excel / LibreOffice が開いている間に作るロックファイル
+~$*
+.~lock.*#
+
+# 個人用の Claude Code 設定
+.claude/settings.local.json
