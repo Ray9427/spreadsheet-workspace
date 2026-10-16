@@ -26,7 +26,7 @@
  */
 
 const LT = {
-  VERSION: 'v2.2(2026-10-16)診断版+所要時間',
+  VERSION: 'v2.3(2026-10-16)診断版+所要時間(読み取りと再計算待ちを分ける)',
   MENU: '🛠 軽量化ツール',
   REPRESENTATIVE_SHEET: '001', // 構造を比べるときの基準にするシート
   CHUNK_CELLS: 50000, // 1回に読むセルの数の上限(行数 = これ ÷ 列数)
@@ -1891,7 +1891,7 @@ function lt_baselineCompare() {
 // 11. 所要時間(試験用コピーだけ。数式を同じ値になる書き方に一時的に替え、毎回もとに戻す)
 // ============================================================
 
-const H_TIMING = ['日時', '回', 'シート', 'セル', '再計算〜読み取り(ミリ秒)', '読むだけ(ミリ秒)', '値は変更前と同じか', 'メモ'];
+const H_TIMING = ['日時', '回', 'シート', 'セル', '合計=書き込み〜読み終わり(ミリ秒)', '変更なしで読むだけ(ミリ秒)', '書き込みと反映の指示(ミリ秒)', '書き込み後の最初の読み取り(再計算待ちを含む)', '再計算・反映待ちの目安(合計−読むだけ)', '値は変更前と同じか', 'メモ'];
 
 function lt_timing() {
   const title = '11. 所要時間を測る';
@@ -1923,7 +1923,8 @@ function lt_timing() {
     const t0 = Date.now();
     const rows = [];
     const before = sheets.map((sh) => sh.getRange(cfg.READ_RANGE).getValues());
-    const ms = cfg.SHEETS.map(() => []);
+    // 1回ごとに 読むだけ / 書き込みと反映の指示 / 書き込み後の最初の読み取り(再計算待ちを含む) を分けて測る
+    const ms = cfg.SHEETS.map(() => ({ total: [], read: [], write: [], first: [], wait: [] }));
     let stopped = '';
     try {
       for (let r = 1; r <= cfg.ROUNDS && !stopped; r++) {
@@ -1934,17 +1935,26 @@ function lt_timing() {
             break;
           }
           const sh = sheets[i];
-          let s = Date.now();
-          sh.getRange(cfg.READ_RANGE).getValues();
-          const readOnly = Date.now() - s;
           [['=(' + originals[i].slice(1) + ')', '書き方を替えたとき'], [originals[i], '元の数式に戻したとき']].forEach(([f, memo]) => {
+            let s = Date.now();
+            sh.getRange(cfg.READ_RANGE).getValues();
+            const read = Date.now() - s;
             s = Date.now();
             cells[i].setFormula(f);
             SpreadsheetApp.flush();
+            const write = Date.now() - s;
+            s = Date.now();
             const v = sh.getRange(cfg.READ_RANGE).getValues();
-            const took = Date.now() - s;
-            ms[i].push(took);
-            rows.push([nowText_(), r, cfg.SHEETS[i], cfg.CELL, took, memo === '書き方を替えたとき' ? readOnly : '', sameGrid_(before[i], v) ? '同じ' : '違う', memo]);
+            const first = Date.now() - s;
+            const total = write + first;
+            const wait = Math.max(0, total - read);
+            const m = ms[i];
+            m.total.push(total);
+            m.read.push(read);
+            m.write.push(write);
+            m.first.push(first);
+            m.wait.push(wait);
+            rows.push([nowText_(), r, cfg.SHEETS[i], cfg.CELL, total, read, write, first, wait, sameGrid_(before[i], v) ? '同じ' : '違う', memo]);
           });
         }
       }
@@ -1955,18 +1965,19 @@ function lt_timing() {
       SpreadsheetApp.flush();
     }
     const restored = cells.every((c, i) => c.getFormula() === originals[i]);
-    const med = ms.map(median_);
-    const summary = cfg.SHEETS.map((n, i) => ['まとめ', ms[i].length + ' 回', n, cfg.CELL, med[i], '', '', '中央値(ミリ秒)']);
-    const ratio = med[0] && med[1] ? Math.round((med[0] / med[1]) * 1000) / 10 : '';
-    summary.push(['まとめ', '', '比', '', ratio === '' ? '' : ratio + '%', '', '', '「' + cfg.SHEETS[0] + '」÷「' + cfg.SHEETS[1] + '」(小さいほど速い)']);
-    summary.push(['まとめ', '', '元に戻ったか', '', restored ? '戻った' : '戻っていない', '', '', stopped || '最後まで測った']);
+    const med = ms.map((m) => ({ total: median_(m.total), read: median_(m.read), write: median_(m.write), first: median_(m.first), wait: median_(m.wait) }));
+    const pct = (a, b) => (a !== '' && b ? Math.round((a / b) * 1000) / 10 + '%' : '');
+    const summary = cfg.SHEETS.map((n, i) => ['まとめ', ms[i].total.length + ' 回', n, cfg.CELL, med[i].total, med[i].read, med[i].write, med[i].first, med[i].wait, '', '中央値(ミリ秒)']);
+    const ratio = pct(med[0].total, med[1].total);
+    summary.push(['まとめ', '', '比', '', ratio, pct(med[0].read, med[1].read), '', '', pct(med[0].wait, med[1].wait), '', '「' + cfg.SHEETS[0] + '」÷「' + cfg.SHEETS[1] + '」(小さいほど速い)']);
+    summary.push(['まとめ', '', '元に戻ったか', '', restored ? '戻った' : '戻っていない', '', '', '', '', '', stopped || '最後まで測った']);
     const sh = writeTable_(S.TIMING, H_TIMING, summary.concat(rows));
-    log_(title, 'メニュー', restored ? '完了' : '要確認: 元の数式に戻っていない', cfg.SHEETS.map((n, i) => n + ' ' + med[i] + 'ms').join(' / ') + (ratio === '' ? '' : ' 比 ' + ratio + '%'));
+    log_(title, 'メニュー', restored ? '完了' : '要確認: 元の数式に戻っていない', cfg.SHEETS.map((n, i) => n + ' 合計 ' + med[i].total + 'ms(読むだけ ' + med[i].read + ' / 再計算・反映待ち ' + med[i].wait + ')').join(' / ') + (ratio === '' ? '' : ' 比 ' + ratio));
     activate_(sh);
-    const changed = rows.filter((x) => x[6] !== '同じ').length;
+    const changed = rows.filter((x) => x[9] !== '同じ').length;
     notify_(title, [
-      cfg.SHEETS.map((n, i) => '「' + n + '」: 中央値 ' + med[i] + ' ミリ秒(' + ms[i].length + ' 回)').join('\n'),
-      ratio === '' ? '' : '比: ' + ratio + '%(小さいほど速い)',
+      cfg.SHEETS.map((n, i) => '「' + n + '」: 合計 ' + med[i].total + ' ミリ秒 = 再計算・反映待ち 約 ' + med[i].wait + ' + 読むだけ 約 ' + med[i].read + '(中央値、' + ms[i].total.length + ' 回)').join('\n'),
+      ratio === '' ? '' : '比: ' + ratio + '(小さいほど速い。このシート1枚を計算し直す時間で、ファイル全体の速さではありません)',
       '',
       restored ? '入れ直したセルは、すべて元の数式に戻りました。' : '⚠ 元の数式に戻っていないセルがあります。シート「' + S.TIMING + '」を確認してください。',
       changed ? '⚠ 値が変更前と違った回が ' + changed + ' 回あります(TODAY() などの影響か確認が必要)。' : '値は毎回、変更前と同じでした。',

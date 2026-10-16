@@ -567,7 +567,11 @@ test('所要時間: 試験用コピーの2枚だけを入れ直し、毎回も�
   ['001', '001_変更前'].forEach((n) => assert.strictEqual(env.testSpec.sheets.find((x) => x.name === n).f[6][11], "='000'!K6"));
   const rows = env.rows(S.TIMING);
   assert.ok(rows.some((r) => r[2] === '元に戻ったか' && r[4] === '戻った'));
-  assert.ok(rows.filter((r) => r[0] !== 'まとめ' && r[0] !== '日時').every((r) => r[6] === '同じ'));
+  const detail = rows.filter((r) => r[0] !== 'まとめ' && r[0] !== '日時');
+  assert.strictEqual(detail.length, 2 * 3 * 2, '1回ごとに1行');
+  assert.ok(detail.every((r) => r[9] === '同じ'));
+  assert.ok(detail.every((r) => r[4] === r[6] + r[7] && r[8] === Math.max(0, r[4] - r[5])), '合計 = 書き込み + 最初の読み取り、待ち = 合計 − 読むだけ');
+  assert.ok(rows.filter((r) => r[0] === 'まとめ' && /回$/.test(String(r[1]))).every((r) => typeof r[5] === 'number' && typeof r[8] === 'number'), 'まとめに読むだけと待ちの中央値');
   assert.ok(env.alerts.some((a) => /今の数式 ='000'!K6/.test(a.msg) && /復旧方法/.test(a.msg)), '確認画面に対象・変更内容・復旧方法');
   noProblems(env);
 });
